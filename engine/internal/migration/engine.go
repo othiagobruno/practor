@@ -2,6 +2,7 @@ package migration
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -76,6 +77,11 @@ CREATE TABLE IF NOT EXISTS "_practor_migrations" (
 )
 `
 
+const (
+	migrationSQLFileName            = "migration.sql"
+	migrationSchemaSnapshotFileName = "schema.practor"
+)
+
 // EnsureMigrationsTable creates the migrations tracking table if it doesn't exist.
 func (e *Engine) EnsureMigrationsTable(ctx context.Context) error {
 	_, err := e.connector.Execute(ctx, migrationsTableSQL)
@@ -109,6 +115,17 @@ func (e *Engine) GetAppliedMigrations(ctx context.Context) ([]string, error) {
 // RecordMigration inserts a migration record into the tracking table.
 func (e *Engine) RecordMigration(ctx context.Context, id, name, sqlContent string) error {
 	_, err := e.connector.Execute(ctx,
+		`INSERT INTO "_practor_migrations" ("id", "name", "sql_content") VALUES ($1, $2, $3)`,
+		id, name, sqlContent,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to record migration '%s': %w", id, err)
+	}
+	return nil
+}
+
+func recordMigrationTx(ctx context.Context, tx *sql.Tx, id, name, sqlContent string) error {
+	_, err := tx.ExecContext(ctx,
 		`INSERT INTO "_practor_migrations" ("id", "name", "sql_content") VALUES ($1, $2, $3)`,
 		id, name, sqlContent,
 	)
@@ -164,7 +181,7 @@ func (e *Engine) Deploy(ctx context.Context, migrationsDir string) (*DeployResul
 			continue // Already applied
 		}
 
-		sqlPath := filepath.Join(migDir, "migration.sql")
+		sqlPath := filepath.Join(migDir, migrationSQLFileName)
 		sqlBytes, err := os.ReadFile(sqlPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read migration '%s': %w", migID, err)
@@ -189,13 +206,13 @@ func (e *Engine) Deploy(ctx context.Context, migrationsDir string) (*DeployResul
 			return nil, fmt.Errorf("failed to apply migration '%s': %w", migID, err)
 		}
 
-		if err := tx.Commit(); err != nil {
-			return nil, fmt.Errorf("failed to commit migration '%s': %w", migID, err)
+		if err := recordMigrationTx(ctx, tx, migID, name, sqlContent); err != nil {
+			tx.Rollback()
+			return nil, err
 		}
 
-		// Record in tracking table (outside the migration tx to avoid schema conflicts)
-		if err := e.RecordMigration(ctx, migID, name, sqlContent); err != nil {
-			return nil, err
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("failed to commit migration '%s': %w", migID, err)
 		}
 
 		appliedMigrations = append(appliedMigrations, migID)
@@ -240,19 +257,33 @@ func (e *Engine) CreateDevMigration(ctx context.Context, migrationsDir, name, sc
 		return nil, fmt.Errorf("failed to ensure migrations table: %w", err)
 	}
 
-	// Generate SQL for the full schema (enums first, then tables)
 	dialect := string(e.connector.GetDialect())
-	var statements []string
-
-	builder := query.NewBuilder(dialect, parsed)
-	for i := range parsed.Enums {
-		statements = append(statements, builder.BuildCreateEnum(&parsed.Enums[i]))
-	}
-	for i := range parsed.Models {
-		statements = append(statements, builder.BuildCreateTable(&parsed.Models[i]))
+	migrationDirs, err := discoverMigrations(migrationsDir)
+	if err != nil {
+		return nil, err
 	}
 
-	sqlContent := strings.Join(statements, "\n\n") + "\n"
+	previousSchema, err := loadPreviousSchemaSnapshot(migrationDirs)
+	if err != nil {
+		return nil, err
+	}
+	if previousSchema == nil && len(migrationDirs) > 0 {
+		return nil, fmt.Errorf(
+			"existing migrations were found in '%s' but no schema snapshots are available; add '%s' to older migrations or create a new baseline",
+			migrationsDir,
+			migrationSchemaSnapshotFileName,
+		)
+	}
+
+	sqlContent, err := generateDevMigrationSQL(previousSchema, parsed, dialect)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(sqlContent) == "" {
+		return &DevMigrationResult{
+			Message: "No schema changes detected",
+		}, nil
+	}
 
 	// Generate migration ID (timestamp + name)
 	timestamp := time.Now().Format("20060102150405")
@@ -268,29 +299,39 @@ func (e *Engine) CreateDevMigration(ctx context.Context, migrationsDir, name, sc
 		return nil, fmt.Errorf("failed to create migration directory: %w", err)
 	}
 
-	sqlPath := filepath.Join(migDir, "migration.sql")
+	sqlPath := filepath.Join(migDir, migrationSQLFileName)
 	if err := os.WriteFile(sqlPath, []byte(sqlContent), 0644); err != nil {
 		return nil, fmt.Errorf("failed to write migration file: %w", err)
+	}
+
+	snapshotPath := filepath.Join(migDir, migrationSchemaSnapshotFileName)
+	if err := os.WriteFile(snapshotPath, data, 0644); err != nil {
+		_ = os.RemoveAll(migDir)
+		return nil, fmt.Errorf("failed to write migration schema snapshot: %w", err)
 	}
 
 	// Apply the migration
 	tx, err := e.connector.BeginTx(ctx, nil)
 	if err != nil {
+		_ = os.RemoveAll(migDir)
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 
 	if _, err := tx.ExecContext(ctx, sqlContent); err != nil {
 		tx.Rollback()
+		_ = os.RemoveAll(migDir)
 		return nil, fmt.Errorf("failed to apply migration: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("failed to commit migration: %w", err)
+	if err := recordMigrationTx(ctx, tx, migrationID, safeName, sqlContent); err != nil {
+		tx.Rollback()
+		_ = os.RemoveAll(migDir)
+		return nil, err
 	}
 
-	// Record migration
-	if err := e.RecordMigration(ctx, migrationID, safeName, sqlContent); err != nil {
-		return nil, err
+	if err := tx.Commit(); err != nil {
+		_ = os.RemoveAll(migDir)
+		return nil, fmt.Errorf("failed to commit migration: %w", err)
 	}
 
 	return &DevMigrationResult{
@@ -380,10 +421,14 @@ func DiffSchemas(from, to *schema.Schema) []Diff {
 		toFields := make(map[string]*schema.Field)
 
 		for i := range fromModel.Fields {
-			fromFields[fromModel.Fields[i].Name] = &fromModel.Fields[i]
+			if isSchemaColumnField(&fromModel.Fields[i]) {
+				fromFields[fromModel.Fields[i].Name] = &fromModel.Fields[i]
+			}
 		}
 		for i := range toModel.Fields {
-			toFields[toModel.Fields[i].Name] = &toModel.Fields[i]
+			if isSchemaColumnField(&toModel.Fields[i]) {
+				toFields[toModel.Fields[i].Name] = &toModel.Fields[i]
+			}
 		}
 
 		// New fields
@@ -418,6 +463,8 @@ func DiffSchemas(from, to *schema.Schema) []Diff {
 			}
 
 			if fromField.Type.Name != toField.Type.Name ||
+				fromField.Type.IsEnum != toField.Type.IsEnum ||
+				fromField.Type.IsScalar != toField.Type.IsScalar ||
 				fromField.IsOptional != toField.IsOptional ||
 				fromField.IsList != toField.IsList {
 				diffs = append(diffs, Diff{
@@ -469,40 +516,137 @@ func DiffSchemas(from, to *schema.Schema) []Diff {
 }
 
 // GenerateMigrationSQL generates SQL for a list of diffs.
-func GenerateMigrationSQL(diffs []Diff, s *schema.Schema, dialect string) string {
-	builder := query.NewBuilder(dialect, s)
+func GenerateMigrationSQL(diffs []Diff, from, to *schema.Schema, dialect string) (string, error) {
+	builder := query.NewBuilder(dialect, to)
 	var statements []string
+	var unsupported []string
 
 	for _, diff := range diffs {
 		switch diff.Type {
 		case DiffCreateModel:
-			for i := range s.Models {
-				if s.Models[i].Name == diff.Model {
-					statements = append(statements, builder.BuildCreateTable(&s.Models[i]))
+			for i := range to.Models {
+				if to.Models[i].Name == diff.Model {
+					statements = append(statements, builder.BuildCreateTable(&to.Models[i]))
 				}
 			}
 		case DiffDropModel:
 			tableName := toSnakeCase(diff.Model)
-			statements = append(statements, fmt.Sprintf(`DROP TABLE IF EXISTS "%s" CASCADE`, tableName))
+			if fromModel := from.GetModelByName(diff.Model); fromModel != nil {
+				tableName = modelDBName(fromModel)
+			}
+			statements = append(statements, fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, quoteIdentifier(tableName)))
 		case DiffCreateEnum:
-			for i := range s.Enums {
-				if s.Enums[i].Name == diff.Model {
-					statements = append(statements, builder.BuildCreateEnum(&s.Enums[i]))
+			for i := range to.Enums {
+				if to.Enums[i].Name == diff.Model {
+					statements = append(statements, builder.BuildCreateEnum(&to.Enums[i]))
 				}
 			}
 		case DiffDropEnum:
 			enumName := toSnakeCase(diff.Model)
-			statements = append(statements, fmt.Sprintf(`DROP TYPE IF EXISTS "%s"`, enumName))
+			if fromEnum := getEnumByName(from, diff.Model); fromEnum != nil {
+				enumName = enumDBName(fromEnum)
+			}
+			statements = append(statements, fmt.Sprintf(`DROP TYPE IF EXISTS %s`, quoteIdentifier(enumName)))
 		case DiffAddField:
-			// Will be implemented with ALTER TABLE support
+			model := to.GetModelByName(diff.Model)
+			if model == nil {
+				return "", fmt.Errorf("model '%s' not found while adding field '%s'", diff.Model, diff.Field)
+			}
+			field := model.GetFieldByName(diff.Field)
+			if field == nil {
+				return "", fmt.Errorf("field '%s' not found in model '%s'", diff.Field, diff.Model)
+			}
+			if !isSchemaColumnField(field) {
+				continue
+			}
+			if field.IsList {
+				unsupported = append(unsupported, fmt.Sprintf("%s.%s list fields", diff.Model, diff.Field))
+				continue
+			}
+			statements = append(statements, fmt.Sprintf(
+				`ALTER TABLE %s ADD COLUMN %s`,
+				quoteIdentifier(modelDBName(model)),
+				buildColumnDefinition(field),
+			))
 		case DiffDropField:
-			tableName := toSnakeCase(diff.Model)
+			model := from.GetModelByName(diff.Model)
+			if model == nil {
+				return "", fmt.Errorf("model '%s' not found while dropping field '%s'", diff.Model, diff.Field)
+			}
+			field := model.GetFieldByName(diff.Field)
+			if field != nil && !isSchemaColumnField(field) {
+				continue
+			}
 			colName := toSnakeCase(diff.Field)
-			statements = append(statements, fmt.Sprintf(`ALTER TABLE "%s" DROP COLUMN IF EXISTS "%s"`, tableName, colName))
+			if field != nil {
+				colName = fieldDBName(field)
+			}
+			statements = append(statements, fmt.Sprintf(
+				`ALTER TABLE %s DROP COLUMN IF EXISTS %s`,
+				quoteIdentifier(modelDBName(model)),
+				quoteIdentifier(colName),
+			))
+		case DiffAlterField:
+			fromModel := from.GetModelByName(diff.Model)
+			toModel := to.GetModelByName(diff.Model)
+			if fromModel == nil || toModel == nil {
+				return "", fmt.Errorf("model '%s' not found while altering field '%s'", diff.Model, diff.Field)
+			}
+			fromField := fromModel.GetFieldByName(diff.Field)
+			toField := toModel.GetFieldByName(diff.Field)
+			if fromField == nil || toField == nil {
+				return "", fmt.Errorf("field '%s' not found in model '%s' while generating alter SQL", diff.Field, diff.Model)
+			}
+			if !isSchemaColumnField(fromField) || !isSchemaColumnField(toField) {
+				continue
+			}
+			if fromField.IsList || toField.IsList {
+				unsupported = append(unsupported, fmt.Sprintf("%s.%s list field alterations", diff.Model, diff.Field))
+				continue
+			}
+
+			tableName := quoteIdentifier(modelDBName(toModel))
+			columnName := quoteIdentifier(fieldDBName(toField))
+
+			if fromField.Type.Name != toField.Type.Name ||
+				fromField.Type.IsEnum != toField.Type.IsEnum ||
+				fromField.Type.IsScalar != toField.Type.IsScalar {
+				statements = append(statements, fmt.Sprintf(
+					`ALTER TABLE %s ALTER COLUMN %s TYPE %s`,
+					tableName,
+					columnName,
+					fieldSQLType(toField),
+				))
+			}
+
+			if fromField.IsOptional != toField.IsOptional {
+				if toField.IsOptional {
+					statements = append(statements, fmt.Sprintf(
+						`ALTER TABLE %s ALTER COLUMN %s DROP NOT NULL`,
+						tableName,
+						columnName,
+					))
+				} else {
+					statements = append(statements, fmt.Sprintf(
+						`ALTER TABLE %s ALTER COLUMN %s SET NOT NULL`,
+						tableName,
+						columnName,
+					))
+				}
+			}
+		case DiffAddIndex, DiffDropIndex:
+			unsupported = append(unsupported, diff.Details)
 		}
 	}
 
-	return strings.Join(statements, ";\n\n") + ";"
+	if len(unsupported) > 0 {
+		return "", fmt.Errorf("unsupported schema changes: %s", strings.Join(unsupported, ", "))
+	}
+	if len(statements) == 0 {
+		return "", fmt.Errorf("schema changes were detected but no SQL statements were generated")
+	}
+
+	return strings.Join(statements, ";\n\n") + ";\n", nil
 }
 
 // ============================================================================
@@ -526,7 +670,7 @@ func discoverMigrations(migrationsDir string) ([]string, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		sqlPath := filepath.Join(migrationsDir, entry.Name(), "migration.sql")
+		sqlPath := filepath.Join(migrationsDir, entry.Name(), migrationSQLFileName)
 		if _, err := os.Stat(sqlPath); err == nil {
 			dirs = append(dirs, filepath.Join(migrationsDir, entry.Name()))
 		}
@@ -572,4 +716,196 @@ func toSnakeCase(s string) string {
 		result.WriteRune(r)
 	}
 	return strings.ToLower(result.String())
+}
+
+func loadPreviousSchemaSnapshot(migrationDirs []string) (*schema.Schema, error) {
+	for i := len(migrationDirs) - 1; i >= 0; i-- {
+		snapshotPath := filepath.Join(migrationDirs[i], migrationSchemaSnapshotFileName)
+		if _, err := os.Stat(snapshotPath); err != nil {
+			continue
+		}
+
+		data, err := os.ReadFile(snapshotPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read schema snapshot '%s': %w", snapshotPath, err)
+		}
+
+		parsed, err := schema.Parse(string(data))
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse schema snapshot '%s': %w", snapshotPath, err)
+		}
+		schema.ResolveFieldTypes(parsed)
+		return parsed, nil
+	}
+
+	return nil, nil
+}
+
+func generateDevMigrationSQL(from, to *schema.Schema, dialect string) (string, error) {
+	if from == nil {
+		return buildFullSchemaSQL(to, dialect), nil
+	}
+
+	diffs := DiffSchemas(from, to)
+	if len(diffs) == 0 {
+		return "", nil
+	}
+
+	return GenerateMigrationSQL(diffs, from, to, dialect)
+}
+
+func buildFullSchemaSQL(s *schema.Schema, dialect string) string {
+	builder := query.NewBuilder(dialect, s)
+	var statements []string
+
+	for i := range s.Enums {
+		statements = append(statements, builder.BuildCreateEnum(&s.Enums[i]))
+	}
+	for i := range s.Models {
+		statements = append(statements, builder.BuildCreateTable(&s.Models[i]))
+	}
+
+	return strings.Join(statements, "\n\n") + "\n"
+}
+
+func getEnumByName(s *schema.Schema, name string) *schema.Enum {
+	if s == nil {
+		return nil
+	}
+
+	for i := range s.Enums {
+		if s.Enums[i].Name == name {
+			return &s.Enums[i]
+		}
+	}
+
+	return nil
+}
+
+func isSchemaColumnField(field *schema.Field) bool {
+	return field != nil && (field.Type.IsScalar || field.Type.IsEnum)
+}
+
+func modelDBName(model *schema.Model) string {
+	if model != nil && model.DBName != "" {
+		return model.DBName
+	}
+	if model == nil {
+		return ""
+	}
+	return toSnakeCase(model.Name)
+}
+
+func enumDBName(enum *schema.Enum) string {
+	if enum != nil && enum.DBName != "" {
+		return enum.DBName
+	}
+	if enum == nil {
+		return ""
+	}
+	return toSnakeCase(enum.Name)
+}
+
+func fieldDBName(field *schema.Field) string {
+	if field == nil {
+		return ""
+	}
+
+	for _, attr := range field.Attributes {
+		if attr.Name == "map" {
+			if name, ok := attr.Args["_0"].(string); ok && name != "" {
+				return name
+			}
+		}
+	}
+
+	return toSnakeCase(field.Name)
+}
+
+func quoteIdentifier(name string) string {
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(name, `"`, `""`))
+}
+
+func escapeStringLiteral(value string) string {
+	return strings.ReplaceAll(value, `'`, `''`)
+}
+
+func fieldSQLType(field *schema.Field) string {
+	switch {
+	case field.DefaultValue != nil &&
+		field.DefaultValue.Type == schema.DefaultValueFunction &&
+		field.DefaultValue.FuncName == "autoincrement" &&
+		field.Type.Name == "BigInt":
+		return "BIGSERIAL"
+	case field.DefaultValue != nil &&
+		field.DefaultValue.Type == schema.DefaultValueFunction &&
+		field.DefaultValue.FuncName == "autoincrement":
+		return "SERIAL"
+	case field.Type.IsEnum:
+		return "TEXT"
+	}
+
+	switch field.Type.Name {
+	case "String":
+		return "TEXT"
+	case "Int":
+		return "INTEGER"
+	case "Float":
+		return "DOUBLE PRECISION"
+	case "Boolean":
+		return "BOOLEAN"
+	case "DateTime":
+		return "TIMESTAMP(3)"
+	case "Json":
+		return "JSONB"
+	case "BigInt":
+		return "BIGINT"
+	case "Bytes":
+		return "BYTEA"
+	case "Decimal":
+		return "DECIMAL(65,30)"
+	default:
+		return "TEXT"
+	}
+}
+
+func buildColumnDefinition(field *schema.Field) string {
+	colDef := fmt.Sprintf("%s %s", quoteIdentifier(fieldDBName(field)), fieldSQLType(field))
+
+	if !field.IsOptional && field.DefaultValue == nil {
+		colDef += " NOT NULL"
+	}
+
+	if field.IsID() {
+		colDef += " PRIMARY KEY"
+	}
+
+	if field.IsUnique() {
+		colDef += " UNIQUE"
+	}
+
+	if field.DefaultValue != nil {
+		switch field.DefaultValue.Type {
+		case schema.DefaultValueLiteral:
+			switch v := field.DefaultValue.Value.(type) {
+			case string:
+				colDef += fmt.Sprintf(" DEFAULT '%s'", escapeStringLiteral(v))
+			case bool:
+				colDef += fmt.Sprintf(" DEFAULT %t", v)
+			default:
+				colDef += fmt.Sprintf(" DEFAULT %v", v)
+			}
+		case schema.DefaultValueFunction:
+			switch field.DefaultValue.FuncName {
+			case "now":
+				colDef += " DEFAULT CURRENT_TIMESTAMP"
+			case "uuid":
+				colDef += " DEFAULT gen_random_uuid()"
+			}
+		case schema.DefaultValueEnum:
+			colDef += fmt.Sprintf(" DEFAULT '%v'", field.DefaultValue.Value)
+		}
+	}
+
+	return colDef
 }

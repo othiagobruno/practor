@@ -8,6 +8,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/practor/practor-engine/internal/connector"
@@ -23,8 +24,13 @@ type Engine struct {
 	connector connector.Connector
 	schema    *schema.Schema
 	builder   *Builder
-	txStore   map[string]*sql.Tx
+	txStore   map[string]*transactionEntry
 	txMu      sync.RWMutex
+}
+
+type transactionEntry struct {
+	tx    *sql.Tx
+	timer *time.Timer
 }
 
 // NewEngine creates a new query Engine.
@@ -34,7 +40,7 @@ func NewEngine(conn connector.Connector, s *schema.Schema) *Engine {
 		connector: conn,
 		schema:    s,
 		builder:   NewBuilder(dialect, s),
-		txStore:   make(map[string]*sql.Tx),
+		txStore:   make(map[string]*transactionEntry),
 	}
 }
 
@@ -455,7 +461,7 @@ func mapIsolationLevel(level string) sql.IsolationLevel {
 }
 
 // BeginTransaction starts a SQL transaction and returns a unique txID.
-func (e *Engine) BeginTransaction(ctx context.Context, isolationLevel string) (string, error) {
+func (e *Engine) BeginTransaction(ctx context.Context, isolationLevel string, timeoutMs int) (string, error) {
 	opts := &sql.TxOptions{
 		Isolation: mapIsolationLevel(isolationLevel),
 	}
@@ -466,50 +472,53 @@ func (e *Engine) BeginTransaction(ctx context.Context, isolationLevel string) (s
 	}
 
 	txID := uuid.New().String()
+	entry := &transactionEntry{tx: tx}
 
 	e.txMu.Lock()
-	e.txStore[txID] = tx
+	e.txStore[txID] = entry
 	e.txMu.Unlock()
+
+	if timeoutMs > 0 {
+		timer := time.AfterFunc(time.Duration(timeoutMs)*time.Millisecond, func() {
+			e.expireTransaction(txID)
+		})
+
+		e.txMu.Lock()
+		if current, ok := e.txStore[txID]; ok && current == entry {
+			current.timer = timer
+		} else {
+			timer.Stop()
+		}
+		e.txMu.Unlock()
+	}
 
 	return txID, nil
 }
 
 // CommitTransaction commits the transaction identified by txID.
 func (e *Engine) CommitTransaction(txID string) error {
-	e.txMu.Lock()
-	tx, ok := e.txStore[txID]
-	if ok {
-		delete(e.txStore, txID)
-	}
-	e.txMu.Unlock()
-
+	entry, ok := e.takeTransaction(txID)
 	if !ok {
 		return fmt.Errorf("transaction '%s' not found", txID)
 	}
 
-	return tx.Commit()
+	return entry.tx.Commit()
 }
 
 // RollbackTransaction rolls back the transaction identified by txID.
 func (e *Engine) RollbackTransaction(txID string) error {
-	e.txMu.Lock()
-	tx, ok := e.txStore[txID]
-	if ok {
-		delete(e.txStore, txID)
-	}
-	e.txMu.Unlock()
-
+	entry, ok := e.takeTransaction(txID)
 	if !ok {
 		return fmt.Errorf("transaction '%s' not found", txID)
 	}
 
-	return tx.Rollback()
+	return entry.tx.Rollback()
 }
 
 // ExecuteInTransaction runs a query/mutation inside the given transaction.
 func (e *Engine) ExecuteInTransaction(ctx context.Context, txID string, model string, action string, args map[string]interface{}) (interface{}, error) {
 	e.txMu.RLock()
-	tx, ok := e.txStore[txID]
+	entry, ok := e.txStore[txID]
 	e.txMu.RUnlock()
 
 	if !ok {
@@ -517,7 +526,31 @@ func (e *Engine) ExecuteInTransaction(ctx context.Context, txID string, model st
 	}
 
 	// Use the transaction-scoped executor
-	return e.executeWithTx(ctx, tx, model, action, args)
+	return e.executeWithTx(ctx, entry.tx, model, action, args)
+}
+
+func (e *Engine) takeTransaction(txID string) (*transactionEntry, bool) {
+	e.txMu.Lock()
+	entry, ok := e.txStore[txID]
+	if ok {
+		delete(e.txStore, txID)
+	}
+	e.txMu.Unlock()
+
+	if ok && entry.timer != nil {
+		entry.timer.Stop()
+	}
+
+	return entry, ok
+}
+
+func (e *Engine) expireTransaction(txID string) {
+	entry, ok := e.takeTransaction(txID)
+	if !ok {
+		return
+	}
+
+	_ = entry.tx.Rollback()
 }
 
 // executeWithTx dispatches a query using the provided sql.Tx instead of the connector.
@@ -956,7 +989,7 @@ func (e *Engine) executeFindManyPaginated(ctx context.Context, model string, arg
 		"data":     data,
 		"page":     page,
 		"limit":    limit,
-		"has_next":  hasNext,
+		"has_next": hasNext,
 		"total":    total,
 	}, nil
 }

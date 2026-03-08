@@ -278,7 +278,7 @@ func (h *EngineHandler) handleTransactionBegin(ctx context.Context, params json.
 		return nil, fmt.Errorf("invalid transaction begin params: %w", err)
 	}
 
-	txID, err := h.queryEngine.BeginTransaction(ctx, p.IsolationLevel)
+	txID, err := h.queryEngine.BeginTransaction(ctx, p.IsolationLevel, p.Timeout)
 	if err != nil {
 		return nil, err
 	}

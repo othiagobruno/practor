@@ -19,18 +19,21 @@ type Handler func(ctx context.Context, params json.RawMessage) (interface{}, err
 
 // Server manages JSON-RPC communication over stdin/stdout.
 type Server struct {
-	handlers map[string]Handler
-	mu       sync.RWMutex
-	reader   *bufio.Reader
-	writer   io.Writer
+	handlers     map[string]Handler
+	mu           sync.RWMutex
+	writeMu      sync.Mutex
+	reader       *bufio.Reader
+	writer       io.Writer
+	handlerSlots chan struct{}
 }
 
 // NewServer creates a new JSON-RPC server.
 func NewServer() *Server {
 	return &Server{
-		handlers: make(map[string]Handler),
-		reader:   bufio.NewReader(os.Stdin),
-		writer:   os.Stdout,
+		handlers:     make(map[string]Handler),
+		reader:       bufio.NewReader(os.Stdin),
+		writer:       os.Stdout,
+		handlerSlots: make(chan struct{}, 32),
 	}
 }
 
@@ -68,7 +71,16 @@ func (s *Server) Start(ctx context.Context) error {
 				continue
 			}
 
-			go s.handleMessage(ctx, line)
+			select {
+			case s.handlerSlots <- struct{}{}:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+
+			go func(message []byte) {
+				defer func() { <-s.handlerSlots }()
+				s.handleMessage(ctx, message)
+			}(line)
 		}
 	}
 }
@@ -105,6 +117,9 @@ func (s *Server) handleMessage(ctx context.Context, data []byte) {
 }
 
 func (s *Server) writeResponse(resp *Response) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	data, err := json.Marshal(resp)
 	if err != nil {
 		// Last resort: write a minimal error
