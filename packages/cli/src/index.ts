@@ -20,7 +20,7 @@ import { execFileSync, execSync } from "child_process";
 // CLI Entry
 // ============================================================================
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 const SCHEMA_FILE = "schema.practor";
 
 /** Resolves the Go engine binary path. */
@@ -35,7 +35,9 @@ function resolveEnginePath(): string {
   const packageName = `@practor/engine-${platform}-${arch}`;
 
   try {
-    const packageDir = path.dirname(require.resolve(`${packageName}/package.json`));
+    const packageDir = path.dirname(
+      require.resolve(`${packageName}/package.json`),
+    );
     return path.join(packageDir, "bin", binaryName);
   } catch {
     // Package not installed — fall through to local fallbacks
@@ -301,6 +303,20 @@ function cmdDbPush(): void {
     process.exit(1);
   }
 
+  if (typeof result.status === "number" && result.status !== 0) {
+    if (result.stderr) {
+      console.error(result.stderr.trim());
+    }
+    process.exit(result.status);
+  }
+
+  if (typeof result.status === "number" && result.status !== 0) {
+    if (result.stderr) {
+      console.error(result.stderr.trim());
+    }
+    process.exit(result.status);
+  }
+
   // Parse responses (skip the ready message, get the actual response)
   const lines = (result.stdout || "").trim().split("\n").filter(Boolean);
   for (const line of lines) {
@@ -323,8 +339,11 @@ function cmdDbPush(): void {
   }
 
   if (result.stderr) {
-    console.error(result.stderr);
+    console.error(result.stderr.trim());
   }
+
+  console.error("❌ Push error: engine returned no db.push response");
+  process.exit(1);
 }
 
 /** `practor migrate dev` — Create and apply a migration. */
@@ -395,8 +414,11 @@ function cmdMigrateDev(name?: string): void {
   }
 
   if (result.stderr) {
-    console.error(result.stderr);
+    console.error(result.stderr.trim());
   }
+
+  console.error("❌ Migration error: engine returned no migrate.dev response");
+  process.exit(1);
 }
 
 /** `practor migrate deploy` — Apply pending migrations in production. */
@@ -439,6 +461,13 @@ function cmdMigrateDeploy(): void {
     process.exit(1);
   }
 
+  if (typeof result.status === "number" && result.status !== 0) {
+    if (result.stderr) {
+      console.error(result.stderr.trim());
+    }
+    process.exit(result.status);
+  }
+
   const lines = (result.stdout || "").trim().split("\n").filter(Boolean);
   for (const line of lines) {
     try {
@@ -465,8 +494,11 @@ function cmdMigrateDeploy(): void {
   }
 
   if (result.stderr) {
-    console.error(result.stderr);
+    console.error(result.stderr.trim());
   }
+
+  console.error("❌ Deploy error: engine returned no migrate.deploy response");
+  process.exit(1);
 }
 
 // ============================================================================

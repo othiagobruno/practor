@@ -22,6 +22,7 @@ type Server struct {
 	handlers     map[string]Handler
 	mu           sync.RWMutex
 	writeMu      sync.Mutex
+	wg           sync.WaitGroup
 	reader       *bufio.Reader
 	writer       io.Writer
 	handlerSlots chan struct{}
@@ -56,13 +57,16 @@ func (s *Server) Start(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			s.wg.Wait()
 			return ctx.Err()
 		default:
 			line, err := s.reader.ReadBytes('\n')
 			if err != nil {
 				if err == io.EOF {
+					s.wg.Wait()
 					return nil // Client closed the connection
 				}
+				s.wg.Wait()
 				return fmt.Errorf("read error: %w", err)
 			}
 
@@ -77,7 +81,9 @@ func (s *Server) Start(ctx context.Context) error {
 				return ctx.Err()
 			}
 
+			s.wg.Add(1)
 			go func(message []byte) {
+				defer s.wg.Done()
 				defer func() { <-s.handlerSlots }()
 				s.handleMessage(ctx, message)
 			}(line)

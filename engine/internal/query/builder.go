@@ -117,6 +117,57 @@ func escapeStringLiteral(value string) string {
 	return strings.ReplaceAll(value, `'`, `''`)
 }
 
+func isUpdatedAtField(field *schema.Field) bool {
+	return field.HasAttribute("updatedAt")
+}
+
+func (b *Builder) castedPlaceholder(sqlType string) string {
+	placeholder := b.placeholder()
+	if placeholder == "?" || sqlType == "" {
+		return placeholder
+	}
+
+	return fmt.Sprintf("%s::%s", placeholder, sqlType)
+}
+
+func (b *Builder) integerPlaceholder() string {
+	return b.castedPlaceholder("BIGINT")
+}
+
+func (b *Builder) fieldSQLType(field *schema.Field) string {
+	switch {
+	case field.Type.IsEnum:
+		return "TEXT"
+	case field.Type.IsScalar:
+		switch field.Type.Name {
+		case "String":
+			return "TEXT"
+		case "Int":
+			return "INTEGER"
+		case "Float":
+			return "DOUBLE PRECISION"
+		case "Boolean":
+			return "BOOLEAN"
+		case "DateTime":
+			return "TIMESTAMP(3)"
+		case "Json":
+			return "JSONB"
+		case "BigInt":
+			return "BIGINT"
+		case "Bytes":
+			return "BYTEA"
+		case "Decimal":
+			return "DECIMAL(65,30)"
+		}
+	}
+
+	return "TEXT"
+}
+
+func (b *Builder) fieldPlaceholder(field *schema.Field) string {
+	return b.castedPlaceholder(b.fieldSQLType(field))
+}
+
 // getModel finds a model by name in the schema.
 func (b *Builder) getModel(name string) *schema.Model {
 	for i := range b.schema.Models {
@@ -195,13 +246,13 @@ func (b *Builder) BuildFindMany(modelName string, args map[string]interface{}) (
 
 	// LIMIT (take)
 	if take, ok := args["take"]; ok {
-		sql += fmt.Sprintf(" LIMIT %s", b.placeholder())
+		sql += fmt.Sprintf(" LIMIT %s", b.integerPlaceholder())
 		sqlArgs = append(sqlArgs, take)
 	}
 
 	// OFFSET (skip)
 	if skip, ok := args["skip"]; ok {
-		sql += fmt.Sprintf(" OFFSET %s", b.placeholder())
+		sql += fmt.Sprintf(" OFFSET %s", b.integerPlaceholder())
 		sqlArgs = append(sqlArgs, skip)
 	}
 
@@ -254,7 +305,7 @@ func (b *Builder) BuildCreate(modelName string, args map[string]interface{}) (*B
 	for _, field := range model.GetScalarFields() {
 		if val, ok := data[field.Name]; ok {
 			columns = append(columns, b.columnName(&field))
-			placeholders = append(placeholders, b.placeholder())
+			placeholders = append(placeholders, b.fieldPlaceholder(&field))
 			sqlArgs = append(sqlArgs, val)
 		}
 	}
@@ -313,7 +364,7 @@ func (b *Builder) BuildCreateMany(modelName string, args map[string]interface{})
 		}
 		var placeholders []string
 		for _, field := range columnFields {
-			placeholders = append(placeholders, b.placeholder())
+			placeholders = append(placeholders, b.fieldPlaceholder(&field))
 			sqlArgs = append(sqlArgs, row[field.Name])
 		}
 		valueGroups = append(valueGroups, fmt.Sprintf("(%s)", strings.Join(placeholders, ", ")))
@@ -355,8 +406,16 @@ func (b *Builder) BuildUpdate(modelName string, args map[string]interface{}) (*B
 
 	for _, field := range model.GetScalarFields() {
 		if val, ok := data[field.Name]; ok {
-			setClauses = append(setClauses, fmt.Sprintf("%s = %s", b.columnName(&field), b.placeholder()))
+			setClauses = append(setClauses, fmt.Sprintf("%s = %s", b.columnName(&field), b.fieldPlaceholder(&field)))
 			sqlArgs = append(sqlArgs, val)
+		}
+	}
+
+	for _, field := range model.GetScalarFields() {
+		if isUpdatedAtField(&field) {
+			if _, ok := data[field.Name]; !ok {
+				setClauses = append(setClauses, fmt.Sprintf("%s = CURRENT_TIMESTAMP", b.columnName(&field)))
+			}
 		}
 	}
 
@@ -402,8 +461,16 @@ func (b *Builder) BuildUpdateMany(modelName string, args map[string]interface{})
 
 	for _, field := range model.GetScalarFields() {
 		if val, ok := data[field.Name]; ok {
-			setClauses = append(setClauses, fmt.Sprintf("%s = %s", b.columnName(&field), b.placeholder()))
+			setClauses = append(setClauses, fmt.Sprintf("%s = %s", b.columnName(&field), b.fieldPlaceholder(&field)))
 			sqlArgs = append(sqlArgs, val)
+		}
+	}
+
+	for _, field := range model.GetScalarFields() {
+		if isUpdatedAtField(&field) {
+			if _, ok := data[field.Name]; !ok {
+				setClauses = append(setClauses, fmt.Sprintf("%s = CURRENT_TIMESTAMP", b.columnName(&field)))
+			}
 		}
 	}
 
@@ -519,7 +586,7 @@ func (b *Builder) BuildUpsert(modelName string, args map[string]interface{}) (*B
 	for _, field := range model.GetScalarFields() {
 		if val, ok := createData[field.Name]; ok {
 			columns = append(columns, b.columnName(&field))
-			placeholders = append(placeholders, b.placeholder())
+			placeholders = append(placeholders, b.fieldPlaceholder(&field))
 			sqlArgs = append(sqlArgs, val)
 		}
 	}
@@ -537,8 +604,16 @@ func (b *Builder) BuildUpsert(modelName string, args map[string]interface{}) (*B
 	var setClauses []string
 	for _, field := range model.GetScalarFields() {
 		if val, ok := updateData[field.Name]; ok {
-			setClauses = append(setClauses, fmt.Sprintf("%s = %s", b.columnName(&field), b.placeholder()))
+			setClauses = append(setClauses, fmt.Sprintf("%s = %s", b.columnName(&field), b.fieldPlaceholder(&field)))
 			sqlArgs = append(sqlArgs, val)
+		}
+	}
+
+	for _, field := range model.GetScalarFields() {
+		if isUpdatedAtField(&field) {
+			if _, ok := updateData[field.Name]; !ok {
+				setClauses = append(setClauses, fmt.Sprintf("%s = CURRENT_TIMESTAMP", b.columnName(&field)))
+			}
 		}
 	}
 
@@ -791,7 +866,7 @@ func (b *Builder) BuildFindManyCursorPaginated(modelName string, args map[string
 			if field == nil {
 				return nil, fmt.Errorf("cursor field '%s' not found in model '%s'", fieldName, modelName)
 			}
-			allConditions = append(allConditions, fmt.Sprintf("%s %s %s", b.columnName(field), op, b.placeholder()))
+			allConditions = append(allConditions, fmt.Sprintf("%s %s %s", b.columnName(field), op, b.fieldPlaceholder(field)))
 			sqlArgs = append(sqlArgs, cursorValue)
 		}
 	}
@@ -810,7 +885,7 @@ func (b *Builder) BuildFindManyCursorPaginated(modelName string, args map[string
 
 	// LIMIT (take, already +1 from caller)
 	if take, ok := args["take"]; ok {
-		sqlStr += fmt.Sprintf(" LIMIT %s", b.placeholder())
+		sqlStr += fmt.Sprintf(" LIMIT %s", b.integerPlaceholder())
 		sqlArgs = append(sqlArgs, take)
 	}
 
@@ -929,7 +1004,7 @@ func (b *Builder) buildFieldCondition(field *schema.Field, value interface{}) (s
 		if value == nil {
 			return fmt.Sprintf("%s IS NULL", col), nil, nil
 		}
-		return fmt.Sprintf("%s = %s", col, b.placeholder()), []interface{}{value}, nil
+		return fmt.Sprintf("%s = %s", col, b.fieldPlaceholder(field)), []interface{}{value}, nil
 	}
 
 	// Operator-based comparison
@@ -943,7 +1018,7 @@ func (b *Builder) buildFieldCondition(field *schema.Field, value interface{}) (s
 			if val == nil {
 				conditions = append(conditions, fmt.Sprintf("%s IS NULL", col))
 			} else {
-				conditions = append(conditions, fmt.Sprintf("%s = %s", col, b.placeholder()))
+				conditions = append(conditions, fmt.Sprintf("%s = %s", col, b.fieldPlaceholder(field)))
 				args = append(args, val)
 			}
 		case "not":
@@ -958,7 +1033,7 @@ func (b *Builder) buildFieldCondition(field *schema.Field, value interface{}) (s
 				conditions = append(conditions, fmt.Sprintf("NOT (%s)", subCond))
 				args = append(args, subArgs...)
 			} else {
-				conditions = append(conditions, fmt.Sprintf("%s != %s", col, b.placeholder()))
+				conditions = append(conditions, fmt.Sprintf("%s != %s", col, b.fieldPlaceholder(field)))
 				args = append(args, val)
 			}
 		case "in":
@@ -968,7 +1043,7 @@ func (b *Builder) buildFieldCondition(field *schema.Field, value interface{}) (s
 			}
 			var placeholders []string
 			for _, v := range inVals {
-				placeholders = append(placeholders, b.placeholder())
+				placeholders = append(placeholders, b.fieldPlaceholder(field))
 				args = append(args, v)
 			}
 			conditions = append(conditions, fmt.Sprintf("%s IN (%s)", col, strings.Join(placeholders, ", ")))
@@ -979,30 +1054,30 @@ func (b *Builder) buildFieldCondition(field *schema.Field, value interface{}) (s
 			}
 			var placeholders []string
 			for _, v := range inVals {
-				placeholders = append(placeholders, b.placeholder())
+				placeholders = append(placeholders, b.fieldPlaceholder(field))
 				args = append(args, v)
 			}
 			conditions = append(conditions, fmt.Sprintf("%s NOT IN (%s)", col, strings.Join(placeholders, ", ")))
 		case "lt":
-			conditions = append(conditions, fmt.Sprintf("%s < %s", col, b.placeholder()))
+			conditions = append(conditions, fmt.Sprintf("%s < %s", col, b.fieldPlaceholder(field)))
 			args = append(args, val)
 		case "lte":
-			conditions = append(conditions, fmt.Sprintf("%s <= %s", col, b.placeholder()))
+			conditions = append(conditions, fmt.Sprintf("%s <= %s", col, b.fieldPlaceholder(field)))
 			args = append(args, val)
 		case "gt":
-			conditions = append(conditions, fmt.Sprintf("%s > %s", col, b.placeholder()))
+			conditions = append(conditions, fmt.Sprintf("%s > %s", col, b.fieldPlaceholder(field)))
 			args = append(args, val)
 		case "gte":
-			conditions = append(conditions, fmt.Sprintf("%s >= %s", col, b.placeholder()))
+			conditions = append(conditions, fmt.Sprintf("%s >= %s", col, b.fieldPlaceholder(field)))
 			args = append(args, val)
 		case "contains":
-			conditions = append(conditions, fmt.Sprintf("%s LIKE %s", col, b.placeholder()))
+			conditions = append(conditions, fmt.Sprintf("%s LIKE %s", col, b.fieldPlaceholder(field)))
 			args = append(args, fmt.Sprintf("%%%v%%", val))
 		case "startsWith":
-			conditions = append(conditions, fmt.Sprintf("%s LIKE %s", col, b.placeholder()))
+			conditions = append(conditions, fmt.Sprintf("%s LIKE %s", col, b.fieldPlaceholder(field)))
 			args = append(args, fmt.Sprintf("%v%%", val))
 		case "endsWith":
-			conditions = append(conditions, fmt.Sprintf("%s LIKE %s", col, b.placeholder()))
+			conditions = append(conditions, fmt.Sprintf("%s LIKE %s", col, b.fieldPlaceholder(field)))
 			args = append(args, fmt.Sprintf("%%%v", val))
 		case "mode":
 			// insensitive mode — handled at the caller level
@@ -1081,7 +1156,7 @@ func (b *Builder) BuildRelationQuery(
 	var placeholders []string
 	var sqlArgs []interface{}
 	for _, id := range parentIDs {
-		placeholders = append(placeholders, b.placeholder())
+		placeholders = append(placeholders, b.fieldPlaceholder(fkField))
 		sqlArgs = append(sqlArgs, id)
 	}
 
@@ -1114,13 +1189,13 @@ func (b *Builder) BuildRelationQuery(
 
 	// LIMIT (take)
 	if take, ok := nestedArgs["take"]; ok {
-		sql += fmt.Sprintf(" LIMIT %s", b.placeholder())
+		sql += fmt.Sprintf(" LIMIT %s", b.integerPlaceholder())
 		sqlArgs = append(sqlArgs, take)
 	}
 
 	// OFFSET (skip)
 	if skip, ok := nestedArgs["skip"]; ok {
-		sql += fmt.Sprintf(" OFFSET %s", b.placeholder())
+		sql += fmt.Sprintf(" OFFSET %s", b.integerPlaceholder())
 		sqlArgs = append(sqlArgs, skip)
 	}
 
@@ -1159,7 +1234,7 @@ func (b *Builder) BuildBelongsToQuery(
 	var placeholders []string
 	var sqlArgs []interface{}
 	for _, val := range parentFKValues {
-		placeholders = append(placeholders, b.placeholder())
+		placeholders = append(placeholders, b.fieldPlaceholder(refField))
 		sqlArgs = append(sqlArgs, val)
 	}
 
@@ -1300,7 +1375,9 @@ func (b *Builder) BuildCreateTable(model *schema.Model) string {
 		}
 
 		// DEFAULT
-		if field.DefaultValue != nil {
+		if isUpdatedAtField(&field) && field.DefaultValue == nil {
+			colDef += " DEFAULT CURRENT_TIMESTAMP"
+		} else if field.DefaultValue != nil {
 			switch field.DefaultValue.Type {
 			case schema.DefaultValueLiteral:
 				switch v := field.DefaultValue.Value.(type) {

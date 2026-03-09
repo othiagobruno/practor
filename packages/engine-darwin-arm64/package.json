@@ -1,6 +1,6 @@
 {
   "name": "@practor/engine-darwin-arm64",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Practor Go query engine binary for macOS ARM64 (Apple Silicon)",
   "os": [
     "darwin"

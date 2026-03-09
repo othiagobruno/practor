@@ -1,6 +1,6 @@
 {
   "name": "@practor/engine-linux-arm64",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Practor Go query engine binary for Linux ARM64",
   "os": [
     "linux"

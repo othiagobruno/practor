@@ -33,6 +33,10 @@ type transactionEntry struct {
 	timer *time.Timer
 }
 
+func (e *Engine) newBuilder() *Builder {
+	return NewBuilder(e.builder.dialect, e.schema)
+}
+
 // NewEngine creates a new query Engine.
 func NewEngine(conn connector.Connector, s *schema.Schema) *Engine {
 	dialect := string(conn.GetDialect())
@@ -91,7 +95,7 @@ func (e *Engine) Execute(ctx context.Context, model string, action string, args 
 // ============================================================================
 
 func (e *Engine) executeFindMany(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildFindMany(model, args)
+	q, err := e.newBuilder().BuildFindMany(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +120,7 @@ func (e *Engine) executeFindMany(ctx context.Context, model string, args map[str
 }
 
 func (e *Engine) executeFindUnique(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildFindUnique(model, args)
+	q, err := e.newBuilder().BuildFindUnique(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +168,7 @@ func (e *Engine) executeFindFirstOrThrow(ctx context.Context, model string, args
 }
 
 func (e *Engine) executeCreate(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildCreate(model, args)
+	q, err := e.newBuilder().BuildCreate(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +197,7 @@ func (e *Engine) executeCreate(ctx context.Context, model string, args map[strin
 }
 
 func (e *Engine) executeCreateMany(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildCreateMany(model, args)
+	q, err := e.newBuilder().BuildCreateMany(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -212,7 +216,7 @@ func (e *Engine) executeCreateMany(ctx context.Context, model string, args map[s
 }
 
 func (e *Engine) executeUpdate(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildUpdate(model, args)
+	q, err := e.newBuilder().BuildUpdate(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +244,7 @@ func (e *Engine) executeUpdate(ctx context.Context, model string, args map[strin
 }
 
 func (e *Engine) executeUpdateMany(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildUpdateMany(model, args)
+	q, err := e.newBuilder().BuildUpdateMany(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -255,7 +259,7 @@ func (e *Engine) executeUpdateMany(ctx context.Context, model string, args map[s
 }
 
 func (e *Engine) executeDelete(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildDelete(model, args)
+	q, err := e.newBuilder().BuildDelete(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +287,7 @@ func (e *Engine) executeDelete(ctx context.Context, model string, args map[strin
 }
 
 func (e *Engine) executeDeleteMany(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildDeleteMany(model, args)
+	q, err := e.newBuilder().BuildDeleteMany(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +302,7 @@ func (e *Engine) executeDeleteMany(ctx context.Context, model string, args map[s
 }
 
 func (e *Engine) executeUpsert(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildUpsert(model, args)
+	q, err := e.newBuilder().BuildUpsert(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -326,7 +330,7 @@ func (e *Engine) executeUpsert(ctx context.Context, model string, args map[strin
 }
 
 func (e *Engine) executeCount(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildCount(model, args)
+	q, err := e.newBuilder().BuildCount(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -341,7 +345,7 @@ func (e *Engine) executeCount(ctx context.Context, model string, args map[string
 }
 
 func (e *Engine) executeAggregate(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildAggregate(model, args)
+	q, err := e.newBuilder().BuildAggregate(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -365,7 +369,7 @@ func (e *Engine) executeAggregate(ctx context.Context, model string, args map[st
 }
 
 func (e *Engine) executeGroupBy(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildGroupBy(model, args)
+	q, err := e.newBuilder().BuildGroupBy(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -392,7 +396,7 @@ func (e *Engine) executeGroupBy(ctx context.Context, model string, args map[stri
 func (e *Engine) PushSchema(ctx context.Context) error {
 	// Create enums first
 	for _, enum := range e.schema.Enums {
-		sql := e.builder.BuildCreateEnum(&enum)
+		sql := e.newBuilder().BuildCreateEnum(&enum)
 		if _, err := e.connector.Execute(ctx, sql); err != nil {
 			return fmt.Errorf("error creating enum '%s': %w", enum.Name, err)
 		}
@@ -400,7 +404,7 @@ func (e *Engine) PushSchema(ctx context.Context) error {
 
 	// Create tables
 	for i := range e.schema.Models {
-		sql := e.builder.BuildCreateTable(&e.schema.Models[i])
+		sql := e.newBuilder().BuildCreateTable(&e.schema.Models[i])
 		if _, err := e.connector.Execute(ctx, sql); err != nil {
 			return fmt.Errorf("error creating table for model '%s': %w", e.schema.Models[i].Name, err)
 		}
@@ -610,7 +614,7 @@ func (e *Engine) txQuery(ctx context.Context, tx *sql.Tx, sql string, args ...in
 }
 
 func (e *Engine) txFindMany(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildFindMany(model, args)
+	q, err := e.newBuilder().BuildFindMany(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -622,7 +626,7 @@ func (e *Engine) txFindMany(ctx context.Context, tx *sql.Tx, model string, args 
 }
 
 func (e *Engine) txFindUnique(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildFindUnique(model, args)
+	q, err := e.newBuilder().BuildFindUnique(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -637,7 +641,7 @@ func (e *Engine) txFindUnique(ctx context.Context, tx *sql.Tx, model string, arg
 }
 
 func (e *Engine) txCreate(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildCreate(model, args)
+	q, err := e.newBuilder().BuildCreate(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -652,7 +656,7 @@ func (e *Engine) txCreate(ctx context.Context, tx *sql.Tx, model string, args ma
 }
 
 func (e *Engine) txUpdate(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildUpdate(model, args)
+	q, err := e.newBuilder().BuildUpdate(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -667,7 +671,7 @@ func (e *Engine) txUpdate(ctx context.Context, tx *sql.Tx, model string, args ma
 }
 
 func (e *Engine) txDelete(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildDelete(model, args)
+	q, err := e.newBuilder().BuildDelete(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -682,7 +686,7 @@ func (e *Engine) txDelete(ctx context.Context, tx *sql.Tx, model string, args ma
 }
 
 func (e *Engine) txCreateMany(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildCreateMany(model, args)
+	q, err := e.newBuilder().BuildCreateMany(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -698,7 +702,7 @@ func (e *Engine) txCreateMany(ctx context.Context, tx *sql.Tx, model string, arg
 }
 
 func (e *Engine) txUpdateMany(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildUpdateMany(model, args)
+	q, err := e.newBuilder().BuildUpdateMany(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -711,7 +715,7 @@ func (e *Engine) txUpdateMany(ctx context.Context, tx *sql.Tx, model string, arg
 }
 
 func (e *Engine) txDeleteMany(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildDeleteMany(model, args)
+	q, err := e.newBuilder().BuildDeleteMany(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -724,7 +728,7 @@ func (e *Engine) txDeleteMany(ctx context.Context, tx *sql.Tx, model string, arg
 }
 
 func (e *Engine) txUpsert(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildUpsert(model, args)
+	q, err := e.newBuilder().BuildUpsert(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -739,7 +743,7 @@ func (e *Engine) txUpsert(ctx context.Context, tx *sql.Tx, model string, args ma
 }
 
 func (e *Engine) txCount(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildCount(model, args)
+	q, err := e.newBuilder().BuildCount(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -752,7 +756,7 @@ func (e *Engine) txCount(ctx context.Context, tx *sql.Tx, model string, args map
 }
 
 func (e *Engine) txAggregate(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildAggregate(model, args)
+	q, err := e.newBuilder().BuildAggregate(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -770,7 +774,7 @@ func (e *Engine) txAggregate(ctx context.Context, tx *sql.Tx, model string, args
 }
 
 func (e *Engine) txGroupBy(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
-	q, err := e.builder.BuildGroupBy(model, args)
+	q, err := e.newBuilder().BuildGroupBy(model, args)
 	if err != nil {
 		return nil, err
 	}
@@ -891,7 +895,7 @@ func (e *Engine) txFindManyCursorPaginated(ctx context.Context, tx *sql.Tx, mode
 	}
 	buildArgs["take"] = float64(take + 1)
 
-	q, err := e.builder.BuildFindManyCursorPaginated(model, buildArgs)
+	q, err := e.newBuilder().BuildFindManyCursorPaginated(model, buildArgs)
 	if err != nil {
 		return nil, fmt.Errorf("cursor pagination build error: %w", err)
 	}
@@ -1051,7 +1055,7 @@ func (e *Engine) executeFindManyCursorPaginated(ctx context.Context, model strin
 	}
 	buildArgs["take"] = float64(take + 1)
 
-	q, err := e.builder.BuildFindManyCursorPaginated(model, buildArgs)
+	q, err := e.newBuilder().BuildFindManyCursorPaginated(model, buildArgs)
 	if err != nil {
 		return nil, fmt.Errorf("cursor pagination build error: %w", err)
 	}
@@ -1268,7 +1272,7 @@ func (e *Engine) loadHasManyOrHasOne(
 	}
 
 	// Build and execute the relation query
-	q, err := e.builder.BuildRelationQuery(relInfo.TargetModel, fkFieldName, parentIDs, nestedArgs)
+	q, err := e.newBuilder().BuildRelationQuery(relInfo.TargetModel, fkFieldName, parentIDs, nestedArgs)
 	if err != nil {
 		return err
 	}
@@ -1346,7 +1350,7 @@ func (e *Engine) loadBelongsTo(
 	}
 
 	// Build and execute query on the target model
-	q, err := e.builder.BuildBelongsToQuery(relInfo.TargetModel, refFieldName, fkValues, nestedArgs)
+	q, err := e.newBuilder().BuildBelongsToQuery(relInfo.TargetModel, refFieldName, fkValues, nestedArgs)
 	if err != nil {
 		return err
 	}

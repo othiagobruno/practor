@@ -136,3 +136,126 @@ func TestCollectParentValuesUsesMappedColumnNames(t *testing.T) {
 		t.Fatalf("unexpected collected values: %#v", values)
 	}
 }
+
+func TestUpdatedAtFieldsReceiveDatabaseDefaultsAndAutoUpdate(t *testing.T) {
+	s := &schema.Schema{
+		Models: []schema.Model{
+			{
+				Name: "User",
+				Fields: []schema.Field{
+					{
+						Name: "id",
+						Type: schema.FieldType{IsScalar: true, Name: "Int"},
+						Attributes: []schema.FieldAttribute{
+							{Name: "id"},
+						},
+					},
+					{
+						Name: "name",
+						Type: schema.FieldType{IsScalar: true, Name: "String"},
+					},
+					{
+						Name: "updatedAt",
+						Type: schema.FieldType{IsScalar: true, Name: "DateTime"},
+						Attributes: []schema.FieldAttribute{
+							{Name: "updatedAt"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	builder := NewBuilder("postgresql", s)
+
+	createTableSQL := builder.BuildCreateTable(&s.Models[0])
+	if !strings.Contains(createTableSQL, `"updated_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP`) {
+		t.Fatalf("expected updatedAt default in DDL, got:\n%s", createTableSQL)
+	}
+
+	updateSQL, err := builder.BuildUpdate("User", map[string]interface{}{
+		"data": map[string]interface{}{
+			"name": "Alice",
+		},
+		"where": map[string]interface{}{
+			"id": 1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildUpdate returned error: %v", err)
+	}
+
+	if !strings.Contains(updateSQL.SQL, `"updated_at" = CURRENT_TIMESTAMP`) {
+		t.Fatalf("expected updatedAt auto-update clause, got:\n%s", updateSQL.SQL)
+	}
+
+	upsertSQL, err := builder.BuildUpsert("User", map[string]interface{}{
+		"where": map[string]interface{}{
+			"id": 1,
+		},
+		"create": map[string]interface{}{
+			"id":   1,
+			"name": "Alice",
+		},
+		"update": map[string]interface{}{
+			"name": "Alice Updated",
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildUpsert returned error: %v", err)
+	}
+
+	if !strings.Contains(upsertSQL.SQL, `"updated_at" = CURRENT_TIMESTAMP`) {
+		t.Fatalf("expected updatedAt auto-update clause in upsert, got:\n%s", upsertSQL.SQL)
+	}
+}
+
+func TestWhereAndPaginationUseTypedPlaceholders(t *testing.T) {
+	s := &schema.Schema{
+		Models: []schema.Model{
+			{
+				Name: "User",
+				Fields: []schema.Field{
+					{
+						Name: "id",
+						Type: schema.FieldType{IsScalar: true, Name: "Int"},
+						Attributes: []schema.FieldAttribute{
+							{Name: "id"},
+						},
+					},
+					{
+						Name: "email",
+						Type: schema.FieldType{IsScalar: true, Name: "String"},
+						Attributes: []schema.FieldAttribute{
+							{Name: "unique"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	builder := NewBuilder("postgresql", s)
+	query, err := builder.BuildFindMany("User", map[string]interface{}{
+		"where": map[string]interface{}{
+			"id": 1,
+		},
+		"take": 10,
+		"skip": 5,
+	})
+	if err != nil {
+		t.Fatalf("BuildFindMany returned error: %v", err)
+	}
+
+	if !strings.Contains(query.SQL, `"id" = $1::INTEGER`) {
+		t.Fatalf("expected typed integer where placeholder, got:\n%s", query.SQL)
+	}
+
+	if !strings.Contains(query.SQL, `LIMIT $2::BIGINT`) {
+		t.Fatalf("expected typed limit placeholder, got:\n%s", query.SQL)
+	}
+
+	if !strings.Contains(query.SQL, `OFFSET $3::BIGINT`) {
+		t.Fatalf("expected typed offset placeholder, got:\n%s", query.SQL)
+	}
+}

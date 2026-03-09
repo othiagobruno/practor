@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports:
+      - "54329:5432"
+    environment:
+      POSTGRES_USER: practor
+      POSTGRES_PASSWORD: practor
+      POSTGRES_DB: practor_benchmark
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U practor -d practor_benchmark"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    volumes:
+      - practor-benchmark-postgres:/var/lib/postgresql/data
+
+volumes:
+  practor-benchmark-postgres:

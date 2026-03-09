@@ -1,6 +1,6 @@
 {
   "name": "@practor/client",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Practor ORM Client — Prisma-compatible ORM powered by Go",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -39,11 +39,11 @@
     "node": ">=18.0.0"
   },
   "optionalDependencies": {
-    "@practor/engine-darwin-x64": "0.3.0",
-    "@practor/engine-darwin-arm64": "0.3.0",
-    "@practor/engine-linux-x64": "0.3.0",
-    "@practor/engine-linux-arm64": "0.3.0",
-    "@practor/engine-win32-x64": "0.3.0"
+    "@practor/engine-darwin-x64": "0.4.0",
+    "@practor/engine-darwin-arm64": "0.4.0",
+    "@practor/engine-linux-x64": "0.4.0",
+    "@practor/engine-linux-arm64": "0.4.0",
+    "@practor/engine-win32-x64": "0.4.0"
   },
   "dependencies": {},
   "devDependencies": {

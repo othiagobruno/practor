@@ -450,6 +450,52 @@ console.log(stats);
 
 ---
 
+## 🧪 Benchmarking
+
+Practor includes a reproducible PostgreSQL benchmark harness in [`benchmarks/`](./benchmarks).
+
+### Start the benchmark database
+
+```bash
+npm run docker:test:up
+```
+
+This starts PostgreSQL 16 on `127.0.0.1:54329` with an isolated `practor_benchmark` database.
+
+### Build, prepare, and run
+
+```bash
+npm run benchmark:build
+npm run benchmark:run
+```
+
+`benchmark:run` prepares the benchmark schema automatically before it seeds data and starts measuring.
+By default this resets the `public` schema in the dedicated benchmark database, so reruns do not inherit stale table definitions.
+It also rebuilds the local packages and Go engine by default, so running `node ./benchmarks/run.js` does not depend on stale artifacts.
+
+Or run the full flow in one command:
+
+```bash
+npm run benchmark:fresh
+```
+
+### Included benchmark cases
+
+- primary-key lookups
+- filtered `findMany`
+- relation loading with `include`
+- offset pagination
+- cursor pagination
+- count queries
+- safe raw SQL
+- inserts, updates, and deletes
+- interactive transactions
+- batch transactions
+
+Each run seeds a dedicated fixture set and writes machine-readable results to `benchmarks/results/latest.json`.
+
+---
+
 ## 🏗 Architecture
 
 ```

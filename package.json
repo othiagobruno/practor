@@ -11,7 +11,15 @@
     "test": "npm run test:packages && npm run test:engine",
     "test:packages": "npm run test --workspaces --if-present",
     "test:engine": "cd engine && go test ./...",
-    "build:engine": "cd engine && go build -o ../bin/practor-engine ./cmd/practor"
+    "build:engine": "cd engine && go build -o ../bin/practor-engine ./cmd/practor",
+    "docker:test:up": "docker compose -f benchmarks/docker-compose.yml up -d",
+    "docker:test:down": "docker compose -f benchmarks/docker-compose.yml down -v",
+    "docker:test:logs": "docker compose -f benchmarks/docker-compose.yml logs -f postgres",
+    "benchmark:build": "npm run build && npm run build:engine",
+    "benchmark:prepare": "node ./benchmarks/prepare.js",
+    "benchmark:run": "node ./benchmarks/run.js",
+    "benchmark": "npm run benchmark:build && npm run benchmark:run",
+    "benchmark:fresh": "npm run docker:test:up && npm run benchmark"
   },
   "devDependencies": {
     "typescript": "^5.4.0"
